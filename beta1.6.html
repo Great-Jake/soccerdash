@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Soccer Dash — Beta 1.6</title>
+<style>
+:root { --sky: #87ceeb; --field: #4caf50; --panel: rgba(0,0,0,0.6); --button:#ffd86b; --shopBg:orange; --shopPanel:yellow; }
+html,body{height:100%;margin:0;background:var(--sky);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#042;display:flex;align-items:center;justify-content:center}
+canvas{background:transparent;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,0.45);display:block}
+.ui{position:fixed;top:12px;left:50%;transform:translateX(-50%);color:#fff;font-weight:700;text-align:center;z-index:10}
+.ui div{margin:3px 0}
+.center-msg{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:20}
+.msg{pointer-events:auto;background:var(--panel);padding:18px;border-radius:12px;text-align:center;color:#fff;max-width:520px}
+button{background:var(--button);border:none;padding:10px 14px;border-radius:8px;font-weight:800;cursor:pointer;margin:6px}
+small{opacity:0.85;color:#fff;display:block;margin-top:6px}
+.shopUI{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:auto;z-index:30}
+.shopPanel{background:var(--shopBg);padding:20px;border-radius:12px;text-align:center;width:300px;}
+.shopTitle{font-weight:800;margin-bottom:10px;color:#fff;}
+.shopColor{padding:12px;margin:6px;border-radius:8px;color:#000;font-weight:700;cursor:pointer;}
+.closeShop{position:absolute;top:10px;right:12px;background:red;color:white;border:none;border-radius:6px;padding:4px 8px;font-weight:700;cursor:pointer;}
+</style>
+</head>
+<body>
+<canvas id="c" width="720" height="600"></canvas>
+<div class="ui"><div id="score">Score: 0</div><div id="level">Level: 1</div><div id="highscore">Highscore: 0</div></div>
+<div class="center-msg" id="centerMsg"></div>
+<script>
+(() => {
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const fieldTop = Math.round(H/4);
+
+// images
+const opponentImg = new Image(); opponentImg.src='https://iili.io/KXfCNRI.png';
+const ballImg = new Image(); ballImg.src='https://iili.io/KXBYDqQ.png';
+const bossImages = [
+  {name:'Messi', src:'https://iili.io/KXfob8Q.png'},
+  {name:'Ronaldo', src:'https://iili.io/KXfxvx1.png'},
+  {name:'Neymar', src:'https://iili.io/KXfIln9.png'},
+  {name:'Mbappe', src:'https://iili.io/KXfToNV.png'}
+];
+const goalImg = new Image(); goalImg.src='https://iili.io/KXCHllS.png';
+
+// UI elements
+const scoreEl=document.getElementById('score');
+const levelEl=document.getElementById('level');
+const highscoreEl=document.getElementById('highscore');
+const centerMsg=document.getElementById('centerMsg');
+
+// state
+let score=0, level=1, running=false;
+let goalPhase=false, bossPhase=false, bossReady=false;
+let difficulty='Normal';
+let highscore=parseInt(localStorage.getItem('soccerHighscore'))||0;
+
+// player & ball
+const player={x:W/2, y:fieldTop+20, r:12, speed:200, color:'#0077ff'};
+const ball={x:player.x, y:player.y-20, r:16, vx:0, vy:0, img:ballImg, moving:false};
+
+// opponents
+const opponents=[];
+let spawnQueue=[];
+let spawnWaveTimer=0;
+
+// clouds
+const clouds=[];
+for(let i=0;i<10;i++) clouds.push({x:Math.random()*W, y:Math.random()*(fieldTop-30)+20, r:20+Math.random()*30});
+
+// boss & goal
+let boss={x:0,y:0,r:22,img:new Image(),vx:0,centerX:0,dribbleTimer:0,dribbleDuration:5,dribbleCycles:3,dribbleAmp:80,canMove:false,name:''};
+let goalActive=false;
+const goalBox={x: W/2-50, y:10, width:100, height:50};
+
+// input
+const keyMap={ArrowLeft:'left',ArrowRight:'right',ArrowUp:'up',ArrowDown:'down',a:'left',d:'right',w:'up',s:'down'};
+const input={left:0,right:0,up:0,down:0};
+window.addEventListener('keydown',e=>{const k=keyMap[e.key];if(k) input[k]=1;});
+window.addEventListener('keyup',e=>{const k=keyMap[e.key];if(k) input[k]=0;});
+
+// dragging for aiming
+let dragging=false, dragStart=null;
+
+// difficulty settings
+function difficultySettings(mode){
+  if(mode==='Easy') return { speedFactor:1.05, interval:5.0, minSpawn:1, maxSpawn:3 };
+  if(mode==='Normal') return { speedFactor:1.0, interval:5.0, minSpawn:1, maxSpawn:10 };
+  return { speedFactor:1.25, interval:3.0, minSpawn:1, maxSpawn:20 };
+}
+
+// spawn opponent
+function spawnOpponent(vy){
+  opponents.push({x:Math.random()*(W-40)+20,y:-30,r:16,img:opponentImg,vy:vy});
+}
+
+// schedule spawn wave
+function scheduleSpawnWave(count, interval, vy){
+  for(let i=0;i<count;i++) spawnQueue.push({delay:Math.random()*interval,vy:vy});
+}
+
+// reset game
+function resetGame(){
+  score=0; level=1; running=true; goalPhase=false; bossPhase=false; bossReady=false;
+  spawnQueue=[]; spawnWaveTimer=0; opponents.length=0;
+  player.x=W/2; player.y=fieldTop+20;
+  ball.x=player.x; ball.y=player.y-20; ball.vx=0; ball.vy=0; ball.moving=false;
+  goalActive=false;
+  scoreEl.textContent='Score: '+score;
+  levelEl.textContent='Level: '+level;
+  highscoreEl.textContent='Highscore: '+highscore;
+  centerMsg.innerHTML='';
+}
+
+// homepage UI
+function showHomepage(){
+  running=false;
+  centerMsg.innerHTML=`
+    <div class="msg">
+      <h2>Soccer Dash — Beta 1.6</h2>
+      <p>Move with arrow keys / WASD. Dodge opponents. Every 10 levels you face a boss — drag the ball to shoot!</p>
+      <div style="margin-top:8px">Select Difficulty:</div>
+      <div style="margin-top:12px">
+        <button id="easyBtn">Easy</button>
+        <button id="normalBtn">Normal</button>
+        <button id="hardBtn">Hard</button>
+      </div>
+      <div style="margin-top:12px">
+        <button id="customBtn">Customization</button>
+      </div>
+      <small>Highscore: ${highscore}</small>
+      <small>Click+drag to aim the ball during boss phase.</small>
+    </div>
+  `;
+  document.getElementById('easyBtn').onclick=()=>startGame('Easy');
+  document.getElementById('normalBtn').onclick=()=>startGame('Normal');
+  document.getElementById('hardBtn').onclick=()=>startGame('Hard');
+  document.getElementById('customBtn').onclick=()=>showCustomization();
+}
+
+// start game
+function startGame(mode){
+  difficulty=mode;
+  resetGame();
+  const ds=difficultySettings(difficulty);
+  const firstCount=Math.floor(Math.random()*(ds.maxSpawn-ds.minSpawn+1)+ds.minSpawn);
+  scheduleSpawnWave(firstCount, ds.interval, 60*ds.speedFactor+level*2);
+  spawnWaveTimer=0;
+  lastTime=performance.now();
+  loop();
+}
+
+// customization UI
+function showCustomization(){
+  centerMsg.innerHTML=`
+  <div class="shopUI">
+    <div class="shopPanel">
+      <button class="closeShop" id="closeShop">X</button>
+      <div class="shopTitle">Player Color</div>
+      <div id="colorOptions"></div>
+      <div style="margin-top:12px;font-weight:700;">Coming Soon</div>
+    </div>
+  </div>`;
+  const colors=['red','blue','purple','green','lime','yellow','magenta','cyan','turquoise','orange','pink','black','white','gray','lightgray'];
+  const colorOptions=document.getElementById('colorOptions');
+  colorOptions.innerHTML='';
+  colors.forEach(c=>{
+    const b=document.createElement('div');
+    b.textContent=c;
+    b.className='shopColor';
+    b.style.background=c;
+    b.onclick=()=>{ player.color=c; };
+    colorOptions.appendChild(b);
+  });
+  document.getElementById('closeShop').onclick=()=>{ centerMsg.innerHTML=''; showHomepage(); };
+}
+
+// mouse/touch drag events
+canvas.addEventListener('mousedown', e=>{
+  if(!bossPhase) return;
+  dragging=true;
+  dragStart={x:e.offsetX, y:e.offsetY};
+});
+canvas.addEventListener('mouseup', e=>{
+  if(!bossPhase || !dragging || !dragStart) return;
+  const dx=e.offsetX-ball.x, dy=e.offsetY-ball.y;
+  const mult=6.5;
+  ball.vx=dx*mult; ball.vy=dy*mult; ball.moving=true;
+  boss.canMove=false;
+  dragging=false; dragStart=null;
+});
+canvas.addEventListener('touchstart', ev=>{
+  if(!bossPhase) return;
+  const t=ev.touches[0];
+  const r=canvas.getBoundingClientRect();
+  dragStart={x:t.clientX-r.left, y:t.clientY-r.top};
+  dragging=true;
+}, {passive:false});
+canvas.addEventListener('touchend', ev=>{
+  if(!bossPhase || !dragging || !dragStart) return;
+  const r=canvas.getBoundingClientRect();
+  const t=ev.changedTouches[0];
+  const dx=t.clientX-r.left-ball.x;
+  const dy=t.clientY-r.top-ball.y;
+  const mult=6.5;
+  ball.vx=dx*mult; ball.vy=dy*mult; ball.moving=true;
+  boss.canMove=false;
+  dragging=false; dragStart=null;
+}, {passive:false});
+
+// draw
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // sky
+  ctx.fillStyle='#87ceeb'; ctx.fillRect(0,0,W,fieldTop);
+  // clouds
+  ctx.fillStyle='white';
+  for(const c of clouds){ ctx.beginPath(); ctx.arc(c.x,c.y,c.r,0,Math.PI*2); ctx.fill(); }
+  // field (always green)
+  ctx.fillStyle='#4caf50';
+  ctx.fillRect(0,fieldTop,W,H-fieldTop);
+  // opponents
+  for(const o of opponents){
+    if(o.img.complete) ctx.drawImage(o.img,o.x-o.r,o.y-o.r,o.r*2,o.r*2);
+    else { ctx.beginPath(); ctx.arc(o.x,o.y,o.r,0,Math.PI*2); ctx.fillStyle='#aa2'; ctx.fill(); }
+  }
+  // goal
+  if(goalActive && goalImg.complete) ctx.drawImage(goalImg,goalBox.x,goalBox.y,goalBox.width,goalBox.height);
+  else if(goalActive){ ctx.fillStyle='white'; ctx.fillRect(goalBox.x,goalBox.y,goalBox.width,goalBox.height); }
+  // player
+  ctx.beginPath();
+  ctx.arc(player.x,player.y,player.r,0,Math.PI*2);
+  ctx.fillStyle=player.color; ctx.fill();
+  // ball
+  if(ball.img.complete) ctx.drawImage(ball.img,ball.x-ball.r,ball.y-ball.r,ball.r*2,ball.r*2);
+  else { ctx.beginPath(); ctx.arc(ball.x,ball.y,ball.r,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill(); }
+  // boss
+  if(bossPhase && boss.img.complete){
+    ctx.fillStyle='white'; ctx.font='16px Arial'; ctx.textAlign='center';
+    ctx.fillText(boss.name,boss.x,boss.y-boss.r-8);
+    ctx.drawImage(boss.img,boss.x-boss.r,boss.y-boss.r,boss.r*2,boss.r*2);
+  }
+  // draw drag arrow
+  if(dragging && dragStart){
+    ctx.strokeStyle='yellow'; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(ball.x,ball.y); ctx.lineTo(dragStart.x,dragStart.y); ctx.stroke();
+  }
+}
+
+// helpers
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function circleColl(a,b){const dx=a.x-b.x,dy=a.y-b.y;return dx*dx+dy*dy<(a.r+b.r)*(a.r+b.r);}
+
+// game over
+function gameOver(msg){
+  running=false;
+  if(score>highscore){ highscore=score; localStorage.setItem('soccerHighscore',highscore); highscoreEl.textContent=highscore; }
+  centerMsg.innerHTML=`
+    <div class="msg">
+      <h2>${msg}</h2>
+      <p>Score: ${score}</p>
+      <div style="margin-top:8px">
+        <button id="replayBtn">Play Again</button>
+        <button id="homeBtn">Go to Homepage</button>
+      </div>
+    </div>`;
+  document.getElementById('replayBtn').onclick=()=>{ resetGame(); loop(); };
+  document.getElementById('homeBtn').onclick=()=>{ showHomepage(); };
+}
+
+// update
+function update(dt){
+  if(!running) return;
+  const ds=difficultySettings(difficulty);
+  const speedFactor=ds.speedFactor;
+
+  // spawn waves
+  if(!goalPhase && !bossPhase){
+    spawnWaveTimer+=dt;
+    if(spawnWaveTimer>=ds.interval){
+      const n=Math.floor(Math.random()*(ds.maxSpawn-ds.minSpawn+1)+ds.minSpawn);
+      const vy=60*speedFactor+level*3;
+      scheduleSpawnWave(n,ds.interval,vy);
+      spawnWaveTimer=0;
+    }
+  }
+  // spawn queue
+  for(let i=spawnQueue.length-1;i>=0;i--){
+    spawnQueue[i].delay-=dt;
+    if(spawnQueue[i].delay<=0){ spawnOpponent(spawnQueue[i].vy); spawnQueue.splice(i,1); }
+  }
+
+  // move opponents
+  for(let i=opponents.length-1;i>=0;i--){
+    const o=opponents[i];
+    o.y+=o.vy*dt;
+    if(circleColl(o,ball)){ gameOver('Hit by opponent!'); return; }
+    if(o.y>H+50){ opponents.splice(i,1); score+=10; scoreEl.textContent='Score: '+score; if(score>highscore){ highscore=score; highscoreEl.textContent=highscore; } }
+  }
+
+  // player movement
+  if(!goalPhase && !bossPhase){
+    const vx=(input.right-input.left)*player.speed;
+    const vy=(input.down-input.up)*player.speed;
+    player.x+=vx*dt; player.y+=vy*dt;
+    player.x=clamp(player.x,player.r,W-player.r);
+    player.y=clamp(player.y,fieldTop+player.r,H-player.r);
+    if(!ball.moving){ ball.x=player.x; ball.y=player.y-20; }
+  }
+
+  // boss/goal phase
+  if(score>=level*100 && !goalPhase && !bossPhase){
+    if(level%10===0){ goalPhase=true; spawnQueue=[]; spawnWaveTimer=0; opponents.length=0; bossReady=false; ball.moving=false; }
+    else{ level++; levelEl.textContent='Level: '+level; }
+  }
+
+  // boss spawn
+  if(goalPhase && !bossPhase && !bossReady){
+    bossReady=true;
+    setTimeout(()=>{
+      bossPhase=true; goalActive=true;
+      const b=bossImages[Math.floor(Math.random()*bossImages.length)];
+      const ds2=difficultySettings(difficulty);
+      boss={
+        x:W/2,
+        y:goalBox.y+goalBox.height+40,
+        r:22,
+        img:new Image(),
+        vx:120*ds2.speedFactor,
+        centerX:W/2,
+        dribbleTimer:0,
+        dribbleDuration:5,
+        dribbleCycles:3,
+        dribbleAmp:80,
+        canMove:true,
+        name:b.name
+      };
+      boss.img.src=b.src;
+      ball.x=player.x; ball.y=player.y-20; ball.moving=false;
+    },2000);
+  }
+
+  // boss dribble logic
+  if(bossPhase && boss.canMove){
+    boss.dribbleTimer+=dt;
+    const freq=boss.dribbleCycles/boss.dribbleDuration;
+    boss.x=boss.centerX + boss.dribbleAmp*Math.sin(2*Math.PI*freq*boss.dribbleTimer);
+    if(boss.dribbleTimer>=boss.dribbleDuration){ boss.canMove=false; }
+  }
+
+  // ball movement during boss phase
+  if(ball.moving){
+    ball.x+=ball.vx*dt; ball.y+=ball.vy*dt;
+    const dx=boss.x-ball.x, dy=boss.y-ball.y;
+    if(Math.hypot(dx,dy)<boss.r+ball.r){ gameOver('Boss intercepted the ball!'); return; }
+    if(ball.y<goalBox.y+goalBox.height && ball.x>goalBox.x && ball.x<goalBox.x+goalBox.width){ score+=50; scoreEl.textContent='Score: '+score; if(score>highscore){ highscore=score; highscoreEl.textContent=highscore; localStorage.setItem('soccerHighscore',highscore); } goalPhase=false; bossPhase=false; bossReady=false; spawnQueue=[]; spawnWaveTimer=0; opponents.length=0; ball.moving=false; goalActive=false; level++; levelEl.textContent='Level: '+level; return; }
+    if(ball.y<-60||ball.y>H+60||ball.x<-60||ball.x>W+60){ bossPhase=false; goalPhase=false; spawnQueue=[]; spawnWaveTimer=0; opponents.length=0; ball.moving=false; goalActive=false; return; }
+  }
+}
+
+// loop
+let lastTime=performance.now();
+function loop(now){
+  const t=now||performance.now();
+  const dt=(t-lastTime)/1000;
+  lastTime=t;
+  update(dt);
+  draw();
+  if(running) requestAnimationFrame(loop);
+}
+
+// start
+showHomepage();
+})();
+</script>
+</body>
+</html>
